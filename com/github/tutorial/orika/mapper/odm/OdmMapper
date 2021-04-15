@@ -1,0 +1,141 @@
+package com.lbg.epscw.mortgagesrvc.odm;
+
+import com.google.common.flogger.FluentLogger;
+import com.google.common.flogger.StackSize;
+import com.lbg.epscw.mortgagesrvc.exception.FieldMapperNotDefinedException;
+import com.lbg.epscw.mortgagesrvc.exception.InputOutputException;
+import ma.glasnost.orika.Converter;
+import ma.glasnost.orika.MapperFacade;
+import ma.glasnost.orika.MapperFactory;
+import ma.glasnost.orika.MappingContext;
+import ma.glasnost.orika.impl.DefaultMapperFactory;
+import ma.glasnost.orika.metadata.ClassMapBuilder;
+import ma.glasnost.orika.metadata.FieldMapBuilder;
+import org.apache.commons.lang3.StringUtils;
+
+import java.io.IOException;
+import java.net.URISyntaxException;
+import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Stream;
+
+public class OdmMapper {
+
+    private static final FieldMappingValidator fieldMappingValidator = new FieldMappingValidator();
+    private static final FluentLogger logger = FluentLogger.forEnclosingClass();
+    private static final FieldMappingManager fieldMappingManager = new FieldMappingManager();
+    private static final YamlConverter yamlConverter = new YamlConverter();
+    private static MapperFactory defaultMapperFactory;
+    public static OdmMapper getInstance(String path){
+        return new OdmMapper(path);
+    }
+
+    private OdmMapper(String path){
+        parseMappings(path);
+        initializeOrikaMapperFactory();
+    }
+
+    private void parseMappings(String mappingDirectory)  {
+        Path dirPath;
+
+        try {
+            dirPath = Paths.get(ClassLoader.getSystemResource(mappingDirectory).toURI());
+            Files.walkFileTree( dirPath, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
+                        throws IOException {
+                    if (!Files.isDirectory(file)) {
+                        String content = new String(Files.readAllBytes(file));
+                        FieldMapping fieldMapping = yamlConverter.readYaml(content,FieldMapping.class);
+                        fieldMappingValidator.validateMapping(fieldMapping);
+                        fieldMappingManager.addFieldMapper(fieldMapping);
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        }
+        catch (URISyntaxException e) {
+            logger.atSevere().withStackTrace(StackSize.MEDIUM).withCause(e).log(e.getMessage());
+            throw new InputOutputException("Missing Mapping Directory Location " + e.getMessage() , e);
+        }catch (IOException e) {
+            logger.atSevere().withStackTrace(StackSize.MEDIUM).withCause(e).log(e.getMessage());
+            throw new InputOutputException("Error while reading mapping configuration " + e.getMessage() , e);
+        }
+    }
+
+    private static void initializeOrikaMapperFactory(){
+        MappingContext.Factory mappingContextFactory = new MappingContext.Factory();
+        defaultMapperFactory = new DefaultMapperFactory.Builder().
+                mappingContextFactory(mappingContextFactory).build();
+    }
+
+    public void registerConverters(Map<String, Converter> converters){
+        converters.forEach(
+                (converterName, converter) -> defaultMapperFactory.getConverterFactory().registerConverter(converterName,converter)
+        );
+    }
+
+    public <T,U> MapperFacade getMapperFacade(Class<T> sourceClazz, Class<U> targetClazz, String mapperId){
+        ClassMapBuilder<T, U> builder;
+        FieldMapping mapping;
+        mapping = fieldMappingManager.getMapping(mapperId);
+        builder = defaultMapperFactory.classMap(sourceClazz,targetClazz);
+        Optional.ofNullable(mapping.getMapping()).
+                map(Collection::stream).
+                orElseGet(Stream::empty).
+                forEach( field -> this.treatField(builder,field));
+        builder.byDefault().register();
+        return defaultMapperFactory.getMapperFacade();
+    }
+
+    private <T,U> void treatField(ClassMapBuilder<T, U> builder, Field field){
+        FieldMapBuilder<T,U> b = builder.fieldMap(field.getSource(),field.getTarget());
+        if(StringUtils.isNotEmpty(field.getConverter())){
+            b.converter(field.getConverter());
+        }
+        if(StringUtils.isNotEmpty(field.getNullable())){
+            b.mapNulls(Boolean.parseBoolean(field.getNullable()));
+        }else{
+            b.mapNulls(false);
+        }
+        if(StringUtils.isNotEmpty(field.getExclude()) && Boolean.parseBoolean(field.getExclude())){
+            b.exclude();
+        }
+        b.add();
+    }
+    public <T,U> U transform(Class<T> sourceClazz, T src, Class<U> destClazz,
+                             String mapperId){
+        MapperFacade facade = getMapperFacade(sourceClazz,destClazz,mapperId);
+        return facade.map(src,destClazz);
+    }
+
+    public <T,U> U transform(Class<T> sourceClazz, T src,
+                             Class<U> destClazz, U dest, String mapperId){
+        MapperFacade facade = getMapperFacade(sourceClazz,destClazz,mapperId);
+        facade.map(src,dest);
+        return dest;
+    }
+
+
+    private static class FieldMappingManager {
+
+        private final ConcurrentHashMap<String, FieldMapping> fieldMappings;
+
+        private FieldMappingManager(){
+            fieldMappings = new ConcurrentHashMap<>();
+        }
+
+        public void addFieldMapper(FieldMapping fieldMapping){
+            fieldMappings.put(fieldMapping.getMapperName(),fieldMapping);
+        }
+
+        public FieldMapping getMapping(String mapperName){
+            FieldMapping fieldMapping = fieldMappings.get(mapperName);
+            return Optional.
+                    ofNullable(fieldMapping).
+                    orElseThrow(()-> new FieldMapperNotDefinedException("Missing Field Mapper, " + mapperName));
+        }
+    }
+}

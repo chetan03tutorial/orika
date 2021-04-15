@@ -1,0 +1,21 @@
+package com.lbg.epscw.mortgagesrvc.odm;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import org.springframework.stereotype.Component;
+import java.io.IOException;
+
+
+@Component
+public class YamlConverter {
+
+    private static ObjectMapper objectMapper = new ObjectMapper(new YAMLFactory());
+
+    public YamlConverter(){
+        objectMapper.findAndRegisterModules();
+    }
+
+    public <T> T readYaml(String content, Class<T> clazz ) throws IOException {
+        return objectMapper.readValue(content,clazz);
+    }
+}
